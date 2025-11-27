@@ -14,6 +14,32 @@ python build_exif_csv.py
 
 The script will output the `exif_metadata.csv` file to the `data` folder.
 
+## Schema
+
+```bash
+| Column               | Description                                          |
+|----------------------|------------------------------------------------------|
+| filepath             | The path to the image file.                          |
+| filename             | The name of the image file.                          |
+| label                | The label of the image.                              |
+| screen_source        | The source of the screen.                            |
+| screen_type          | The type of screen.                                  |
+| image_width          | The width of the image.                              |
+| image_height         | The height of the image.                             |
+| focal_length_35mm_eq | The focal length of the image in 35mm equivalent.    |
+| f_number             | The f-number of the image.                           |
+| exposure_time        | The exposure time of the image.                      |
+| shutter_speed_value  | The shutter speed value of the image.                |
+| iso                  | The ISO of the image.                                |
+| metering_mode        | The metering mode of the image.                      |
+| device_model         | The model of the device.                             |
+| device_make          | The make of the device.                              |
+| lens_model           | The model of the lens.                               |
+| datetime_original    | The date and time the image was originally captured. |
+| orientation          | The orientation of the image.                        |
+| flash                | The flash mode of the image.                         |
+```
+
 ## Structure
 
 ```bash

@@ -1,12 +1,16 @@
 # ignore ds store
 .DS_Store
 
+# Don't commit artifacts
+artifacts/
+
 # Don't commit raw photos
 data/authentic/*
 data/re-photo/ai-LCD/*
 data/re-photo/ai-OLED/*
 data/re-photo/authentic-LCD/*
 data/re-photo/authentic-OLED/*
+data/validate/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
