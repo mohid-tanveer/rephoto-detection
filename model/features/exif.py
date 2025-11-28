@@ -57,7 +57,8 @@ def build_exif_feature_table(index_df: pd.DataFrame) -> Tuple[pd.DataFrame, List
     construct a clean dataframe of engineered exif features and return the column order.
     """
     feature_df = engineer_features(index_df)
-    columns = feature_df.columns.tolist()
+    columns = sorted(feature_df.columns.tolist())
+    feature_df = feature_df.reindex(columns=columns, fill_value=0.0)
     return feature_df, columns
 
 

@@ -21,12 +21,16 @@ from model.features.exif import (
     transform_single_exif,
 )
 from model.features.moire import MoireTileMetrics, extract_moire_features
+from model.features.moire_wavelet import (
+    build_wavelet_dataset,
+    compute_wavelet_and_spatial,
+)
 from model.features.subpixel import SubpixelTileMetrics, extract_subpixel_features
 from model.models.exif_prior import ExifPriorModel
 from model.models.hybrid_classifier import HybridConfig, HybridFusionModel
 from model.models.logistic_head import LogisticConfig as SubpixelLogisticConfig
 from model.models.logistic_head import LogisticHead
-from model.models.spectral_net import SpectralNetConfig, SpectralNetModel
+from model.models.moire_wavelet_cnn import MoireWaveletConfig, MoireWaveletModel
 from model.utils.image import load_image
 
 logger = logging.getLogger(__name__)
@@ -118,24 +122,37 @@ class PipelineConfig:
     force_feature_recompute: bool = False
     force_index_recompute: bool = False
     device: str | None = None
-    exif_holdout_fraction: float = 0.2
+    test_data_dir: Path | None = None
+    test_exif_csv: Path | None = None
 
 
 @dataclass
 class FeatureStore:
     table: pd.DataFrame
     feature_groups: Dict[str, List[str]]
+    moire_wavelet: np.ndarray | None = None
+    moire_spatial: np.ndarray | None = None
 
-    def subset(self, mask: pd.Series) -> "FeatureStore":
+    def subset(self, mask: pd.Series | np.ndarray) -> "FeatureStore":
+        subset_table = self.table.loc[mask].reset_index(drop=True)
+        bool_mask = mask.to_numpy() if isinstance(mask, pd.Series) else np.asarray(mask)
+        subset_wavelet = None
+        subset_spatial = None
+        if self.moire_wavelet is not None:
+            subset_wavelet = self.moire_wavelet[bool_mask]
+        if self.moire_spatial is not None:
+            subset_spatial = self.moire_spatial[bool_mask]
         return FeatureStore(
-            table=self.table.loc[mask].reset_index(drop=True),
+            table=subset_table,
             feature_groups=self.feature_groups,
+            moire_wavelet=subset_wavelet,
+            moire_spatial=subset_spatial,
         )
 
 
 @dataclass
 class ModelBundle:
-    moire_model: SpectralNetModel
+    moire_model: MoireWaveletModel
     subpixel_model: object
     exif_model: ExifPriorModel
     fusion_model: HybridFusionModel
@@ -222,6 +239,10 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
         config,
         f"subpixel_t{config.tile_size}_s{config.tile_stride}.pkl",
     )
+    wavelet_cache = _feature_cache_path(
+        config,
+        f"wavelet_t{config.tile_size}.npz",
+    )
 
     if moire_cache.exists() and not config.force_feature_recompute:
         moire_df = pd.read_pickle(moire_cache)
@@ -273,6 +294,14 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
         subpixel_df = pd.DataFrame(subpixel_records)
         subpixel_df.to_pickle(subpixel_cache)
 
+    wavelet_tensors, spatial_tensors = build_wavelet_dataset(
+        index_df,
+        target_size=config.tile_size,
+        wavelet="db2",
+        cache_path=wavelet_cache,
+        force_recompute=config.force_feature_recompute,
+    )
+
     exif_features, exif_columns = build_exif_feature_table(index_df)
     exif_features = exif_features.reset_index(drop=True)
     exif_features["image_id"] = index_df["image_id"].values
@@ -298,7 +327,12 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
         "exif": exif_columns,
     }
 
-    return FeatureStore(table=feature_df, feature_groups=feature_groups)
+    return FeatureStore(
+        table=feature_df,
+        feature_groups=feature_groups,
+        moire_wavelet=wavelet_tensors,
+        moire_spatial=spatial_tensors,
+    )
 
 
 def _fit_model(model, X_train, y_train, X_val=None, y_val=None):
@@ -331,6 +365,28 @@ def _train_signal_model(
     return final_model, oof
 
 
+def _train_wavelet_model(
+    model_factory: Callable[[], MoireWaveletModel],
+    wavelet_tensors: np.ndarray,
+    spatial_tensors: np.ndarray,
+    y: np.ndarray,
+    folds: int = 5,
+) -> Tuple[MoireWaveletModel, np.ndarray]:
+    skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+    oof = np.zeros_like(y, dtype=np.float32)
+    for train_idx, val_idx in skf.split(wavelet_tensors, y):
+        model = model_factory()
+        w_train, w_val = wavelet_tensors[train_idx], wavelet_tensors[val_idx]
+        s_train, s_val = spatial_tensors[train_idx], spatial_tensors[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+        model.fit(w_train, s_train, y_train, val_data=(w_val, s_val, y_val))
+        oof[val_idx] = model.predict_proba(w_val, s_val)
+
+    final_model = model_factory()
+    final_model.fit(wavelet_tensors, spatial_tensors, y)
+    return final_model, oof
+
+
 def train_models(
     store: FeatureStore,
     config: PipelineConfig,
@@ -340,17 +396,22 @@ def train_models(
     table = store.table
     y = table["label_binary"].values.astype(np.float32)
 
-    moire_cols = store.feature_groups["moire"]
     subpixel_cols = store.feature_groups["subpixel"]
     exif_cols = store.feature_groups["exif"]
 
-    moire_X = table[moire_cols].values.astype(np.float32)
-    subpixel_X = table[subpixel_cols].values.astype(np.float32)
-    exif_X = table[exif_cols].values.astype(np.float32)
+    if store.moire_wavelet is None or store.moire_spatial is None:
+        raise ValueError("wavelet/spatial tensors missing; rebuild feature store")
+    moire_wavelet = store.moire_wavelet.astype(np.float32)
+    moire_spatial = store.moire_spatial.astype(np.float32)
+    subpixel_X = table.reindex(columns=subpixel_cols, fill_value=0.0).values.astype(
+        np.float32
+    )
+    exif_X = table.reindex(columns=exif_cols, fill_value=0.0).values.astype(np.float32)
 
-    moire_factory = lambda: SpectralNetModel(
-        SpectralNetConfig(
-            input_dim=moire_X.shape[1],
+    moire_factory = lambda: MoireWaveletModel(
+        MoireWaveletConfig(
+            wavelet_channels=moire_wavelet.shape[1],
+            spatial_channels=moire_spatial.shape[1],
             device=config.device,
         )
     )
@@ -360,25 +421,11 @@ def train_models(
     )
     exif_factory = lambda: ExifPriorModel(feature_names=exif_cols)
 
-    moire_model, moire_oof = _train_signal_model(moire_factory, moire_X, y)
+    moire_model, moire_oof = _train_wavelet_model(
+        moire_factory, moire_wavelet, moire_spatial, y
+    )
     subpixel_model, subpixel_oof = _train_signal_model(subpixel_factory, subpixel_X, y)
-
-    exif_indices = np.arange(len(y))
-    exif_train_idx, exif_holdout_idx = train_test_split(
-        exif_indices,
-        test_size=config.exif_holdout_fraction,
-        stratify=y,
-        random_state=42,
-    )
-    exif_train_X, exif_train_y = exif_X[exif_train_idx], y[exif_train_idx]
-    exif_holdout_X = exif_X[exif_holdout_idx]
-
-    exif_model, exif_train_oof = _train_signal_model(
-        exif_factory, exif_train_X, exif_train_y
-    )
-    exif_oof = np.zeros_like(y, dtype=np.float32)
-    exif_oof[exif_train_idx] = exif_train_oof
-    exif_oof[exif_holdout_idx] = exif_model.predict_proba(exif_holdout_X)
+    exif_model, exif_oof = _train_signal_model(exif_factory, exif_X, y)
 
     fusion_inputs = np.stack([moire_oof, subpixel_oof, exif_oof], axis=1)
     fusion_train_X, fusion_val_X, fusion_train_y, fusion_val_y = train_test_split(
@@ -409,7 +456,7 @@ def train_models(
 
 
 def save_model_bundle(bundle: ModelBundle, config: PipelineConfig) -> None:
-    bundle.moire_model.save(_model_path(config, "moire.pt"))
+    bundle.moire_model.save(_model_path(config, "moire_wavelet.pt"))
     bundle.subpixel_model.save(_model_path(config, "subpixel.joblib"))
     bundle.exif_model.save(_model_path(config, "exif.joblib"))
     bundle.fusion_model.save(_model_path(config, "fusion.pt"))
@@ -418,7 +465,7 @@ def save_model_bundle(bundle: ModelBundle, config: PipelineConfig) -> None:
 def load_model_bundle(
     config: PipelineConfig, feature_groups: Dict[str, List[str]]
 ) -> ModelBundle:
-    moire_model = SpectralNetModel.load(_model_path(config, "moire.pt"))
+    moire_model = MoireWaveletModel.load(_model_path(config, "moire_wavelet.pt"))
     subpixel_model = LogisticHead.load(_model_path(config, "subpixel.joblib"))
     exif_model = ExifPriorModel.load(_model_path(config, "exif.joblib"))
     fusion_model = HybridFusionModel.load(_model_path(config, "fusion.pt"))
@@ -451,18 +498,21 @@ def load_metadata(config: PipelineConfig) -> Dict:
 
 def predict_with_bundle(store: FeatureStore, bundle: ModelBundle) -> pd.DataFrame:
     table = store.table
-    moire_cols = bundle.feature_groups["moire"]
     subpixel_cols = bundle.feature_groups["subpixel"]
     exif_cols = bundle.feature_groups["exif"]
 
+    if store.moire_wavelet is None or store.moire_spatial is None:
+        raise ValueError("wavelet/spatial tensors missing; rebuild feature store")
+
     moire_probs = bundle.moire_model.predict_proba(
-        table[moire_cols].values.astype(np.float32)
+        store.moire_wavelet.astype(np.float32),
+        store.moire_spatial.astype(np.float32),
     )
     subpixel_probs = bundle.subpixel_model.predict_proba(
-        table[subpixel_cols].values.astype(np.float32)
+        table.reindex(columns=subpixel_cols, fill_value=0.0).values.astype(np.float32)
     )
     exif_probs = bundle.exif_model.predict_proba(
-        table[exif_cols].values.astype(np.float32)
+        table.reindex(columns=exif_cols, fill_value=0.0).values.astype(np.float32)
     )
     fusion_inputs = np.stack([moire_probs, subpixel_probs, exif_probs], axis=1)
     hybrid_probs = bundle.fusion_model.predict_proba(fusion_inputs)
@@ -595,6 +645,32 @@ def run_full_pipeline(
     return store, bundle, metrics
 
 
+def build_test_store(config: PipelineConfig) -> FeatureStore:
+    if config.test_data_dir is None or config.test_exif_csv is None:
+        raise ValueError("test_data_dir and test_exif_csv must be provided")
+    test_config = PipelineConfig(
+        data_dir=config.test_data_dir,
+        exif_csv=config.test_exif_csv,
+        artifacts_dir=config.artifacts_dir / "test",
+        tile_size=config.tile_size,
+        tile_stride=config.tile_stride,
+        max_tiles_per_image=config.max_tiles_per_image,
+        force_feature_recompute=config.force_feature_recompute,
+        force_index_recompute=config.force_index_recompute,
+        device=config.device,
+    )
+    return build_feature_store(test_config)
+
+
+def evaluate_on_test_set(
+    config: PipelineConfig, bundle: ModelBundle
+) -> Tuple[FeatureStore, pd.DataFrame]:
+    test_store = build_test_store(config)
+    test_predictions = predict_with_bundle(test_store, bundle)
+    test_metrics = summarize_metrics(test_predictions)
+    return test_store, test_metrics
+
+
 def build_exif_vector(store: FeatureStore, image_id: str) -> np.ndarray:
     row = store.table.loc[store.table["image_id"] == image_id]
     if row.empty:
@@ -630,10 +706,6 @@ def score_image(
         max_tiles=config.max_tiles_per_image,
     )
 
-    moire_vec = np.array(
-        [moire_summary.get(col, 0.0) for col in bundle.feature_groups["moire"]],
-        dtype=np.float32,
-    ).reshape(1, -1)
     subpixel_vec = np.array(
         [subpixel_summary.get(col, 0.0) for col in bundle.feature_groups["subpixel"]],
         dtype=np.float32,
@@ -658,7 +730,17 @@ def score_image(
                 exif_arr = np.zeros(len(feature_cols), dtype=np.float32)
         exif_vec = exif_arr.reshape(1, -1)
 
-    moire_prob = float(bundle.moire_model.predict_proba(moire_vec)[0])
+    wavelet_tensor, spatial_tensor = compute_wavelet_and_spatial(
+        img_path,
+        wavelet_size=config.tile_size,
+        spatial_size=config.tile_size,
+        wavelet="db2",
+    )
+    moire_prob = float(
+        bundle.moire_model.predict_proba(
+            wavelet_tensor[np.newaxis, ...], spatial_tensor[np.newaxis, ...]
+        )[0]
+    )
     subpixel_prob = float(bundle.subpixel_model.predict_proba(subpixel_vec)[0])
     exif_prob = float(bundle.exif_model.predict_proba(exif_vec)[0])
     fusion_input = np.array([[moire_prob, subpixel_prob, exif_prob]], dtype=np.float32)

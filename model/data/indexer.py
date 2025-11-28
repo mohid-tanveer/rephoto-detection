@@ -42,6 +42,15 @@ def _prepare_dataframe(df: pd.DataFrame, base_dir: Path) -> pd.DataFrame:
     return df
 
 
+def _resolve_base_dir(data_dir: Path) -> Path:
+    current = data_dir.resolve()
+    while current.name != "data" and current.parent != current:
+        current = current.parent
+    if current.name == "data":
+        return current.parent
+    return data_dir
+
+
 def load_or_build_index(
     config: IndexConfig, *, force_recompute: bool = False
 ) -> pd.DataFrame:
@@ -53,8 +62,8 @@ def load_or_build_index(
         return pd.read_pickle(cache_path)
 
     df = pd.read_csv(config.exif_csv)
-    repo_root = config.data_dir.parent
-    df = _prepare_dataframe(df, repo_root)
+    base_dir = _resolve_base_dir(config.data_dir)
+    df = _prepare_dataframe(df, base_dir)
 
     config.artifacts_dir.mkdir(parents=True, exist_ok=True)
     df.to_pickle(cache_path)

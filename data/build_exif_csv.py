@@ -19,6 +19,11 @@ def iter_image_files(data_dir):
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
+        # skip test and validate directories
+        if path.parent.parent.name == "test" or path.parent.name == "validate":
+            continue
+        if path.parent.parent.parent.name == "test":
+            continue
         if suffix in {".jpg", ".jpeg"}:
             image_paths.append(path)
     return sorted(image_paths)

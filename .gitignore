@@ -11,6 +11,11 @@ data/re-photo/ai-OLED/*
 data/re-photo/authentic-LCD/*
 data/re-photo/authentic-OLED/*
 data/validate/*
+data/test/authentic/*
+data/test/re-photo/ai-LCD/*
+data/test/re-photo/ai-OLED/*
+data/test/re-photo/authentic-LCD/*
+data/test/re-photo/authentic-OLED/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
