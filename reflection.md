@@ -205,15 +205,6 @@ based on the plan vs. implementation and the observed metrics, several follow-up
     - add intermediate feature visualizations or saliency maps to understand which regions drive its predictions,
     - test whether combining engineered moire statistics with the cnn embeddings improves robustness.
 
-- **rebalance the fusion head**
-  - currently, the fusion head can safely learn to rely almost entirely on exif.
-  - if we want a detector that remains useful when exif is missing or untrustworthy (e.g., stripped metadata or tampered tags), we could:
-    - train alternative fusion heads:
-      - one **exif-only**, one **image-only** (moire + subpixel or cnn-only),
-      - and a full hybrid,
-    - explicitly evaluate the **image-only** branch on lod/loc and new datasets to understand its independent value.
-  - a longer-term idea is to impose a **regularization objective** that encourages the fusion head to keep non-trivial weights on moire/subpixel even when exif is strong.
-
 ## concluding reflection
 
 the final implementation faithfully realizes the original concept of a hybrid re-photo detector, but the **relative importance of the three signals** is quite different from what we initially expected: exif dominates, moire helps but is secondary, and the current subpixel branch is not yet reliable. this is a useful outcome in itself: it highlights that **capture metadata can be extremely informative in controlled settings**, but also that we need more diverse data and more careful modeling if we want robust, image-based cues that generalize beyond a single capture protocol. for future iterations, the most impactful work is likely to be **testing exif’s limits** on new datasets and **substantially rethinking subpixel modeling**, treating the current implementation as a first, informative prototype rather than a final answer.
