@@ -197,14 +197,6 @@ based on the plan vs. implementation and the observed metrics, several follow-up
   - in parallel, perform targeted qualitative analysis:
     - visualize cross-power spectra and tile-level scores on a few representative re-photos and authentic images to see what the current features are actually picking up.
 
-- **strengthen and interpret moire modeling**
-  - augment the dataset with scenes and displays that are more likely to produce moire:
-    - high-frequency content on screens (text, striped patterns),
-    - varied viewing angles and distances.
-  - use the existing wavelet cnn but:
-    - add intermediate feature visualizations or saliency maps to understand which regions drive its predictions,
-    - test whether combining engineered moire statistics with the cnn embeddings improves robustness.
-
 ## concluding reflection
 
 the final implementation faithfully realizes the original concept of a hybrid re-photo detector, but the **relative importance of the three signals** is quite different from what we initially expected: exif dominates, moire helps but is secondary, and the current subpixel branch is not yet reliable. this is a useful outcome in itself: it highlights that **capture metadata can be extremely informative in controlled settings**, but also that we need more diverse data and more careful modeling if we want robust, image-based cues that generalize beyond a single capture protocol. for future iterations, the most impactful work is likely to be **testing exif’s limits** on new datasets and **substantially rethinking subpixel modeling**, treating the current implementation as a first, informative prototype rather than a final answer.
