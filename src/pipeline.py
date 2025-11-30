@@ -13,25 +13,22 @@ from PIL import ExifTags, Image
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
-from model.data.indexer import IndexConfig, load_or_build_index
-from model.features.exif import (
+from src.data.indexer import IndexConfig, load_or_build_index
+from src.features.exif import (
     CATEGORICAL_COLUMNS,
     NUMERIC_COLUMNS,
     build_exif_feature_table,
-    transform_single_exif,
 )
-from model.features.moire import MoireTileMetrics, extract_moire_features
-from model.features.moire_wavelet import (
+from src.features.moire_wavelet import (
     build_wavelet_dataset,
-    compute_wavelet_and_spatial,
 )
-from model.features.subpixel import SubpixelTileMetrics, extract_subpixel_features
-from model.models.exif_prior import ExifPriorModel
-from model.models.hybrid_classifier import HybridConfig, HybridFusionModel
-from model.models.logistic_head import LogisticConfig as SubpixelLogisticConfig
-from model.models.logistic_head import LogisticHead
-from model.models.moire_wavelet_cnn import MoireWaveletConfig, MoireWaveletModel
-from model.utils.image import load_image
+from src.features.subpixel import extract_subpixel_features
+from src.models.exif_prior import ExifPriorModel
+from src.models.hybrid_classifier import HybridConfig, HybridFusionModel
+from src.models.logistic_head import LogisticConfig as SubpixelLogisticConfig
+from src.models.logistic_head import LogisticHead
+from src.models.moire_wavelet_cnn import MoireWaveletConfig, MoireWaveletModel
+from src.utils.image import load_image
 
 logger = logging.getLogger(__name__)
 
@@ -231,10 +228,6 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
         index_cfg, force_recompute=config.force_index_recompute
     )
 
-    moire_cache = _feature_cache_path(
-        config,
-        f"moire_t{config.tile_size}_s{config.tile_stride}.pkl",
-    )
     subpixel_cache = _feature_cache_path(
         config,
         f"subpixel_t{config.tile_size}_s{config.tile_stride}.pkl",
@@ -243,31 +236,6 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
         config,
         f"wavelet_t{config.tile_size}.npz",
     )
-
-    if moire_cache.exists() and not config.force_feature_recompute:
-        moire_df = pd.read_pickle(moire_cache)
-    else:
-        moire_records = []
-        for row in tqdm(
-            index_df.itertuples(), total=len(index_df), desc="moire features"
-        ):
-            try:
-                img = load_image(row.abs_path, mode="gray")
-                summary, _ = extract_moire_features(
-                    img,
-                    tile_size=config.tile_size,
-                    stride=config.tile_stride,
-                    max_tiles=config.max_tiles_per_image,
-                )
-                summary["image_id"] = row.image_id
-                moire_records.append(summary)
-            except Exception:  # pragma: no cover
-                logger.exception(
-                    "failed to compute moire features for %s", row.abs_path
-                )
-                continue
-        moire_df = pd.DataFrame(moire_records)
-        moire_df.to_pickle(moire_cache)
 
     if subpixel_cache.exists() and not config.force_feature_recompute:
         subpixel_df = pd.read_pickle(subpixel_cache)
@@ -316,13 +284,11 @@ def build_feature_store(config: PipelineConfig) -> FeatureStore:
             "camera_body",
         ]
     ].copy()
-    feature_df = feature_df.merge(moire_df, on="image_id", how="left")
     feature_df = feature_df.merge(subpixel_df, on="image_id", how="left")
     feature_df = feature_df.merge(exif_features, on="image_id", how="left")
     feature_df = feature_df.fillna(0.0)
 
     feature_groups = {
-        "moire": [c for c in feature_df.columns if c.startswith("moire_")],
         "subpixel": [c for c in feature_df.columns if c.startswith("subpixel_")],
         "exif": exif_columns,
     }
@@ -634,15 +600,13 @@ def evaluate_leave_one(
 
 def run_full_pipeline(
     config: PipelineConfig,
-) -> Tuple[FeatureStore, ModelBundle, pd.DataFrame]:
+) -> Tuple[FeatureStore, ModelBundle]:
     """
     convenience helper used by the notebook to build features, train models, and capture metrics.
     """
     store = build_feature_store(config)
     bundle = train_models(store, config, save_artifacts=True)
-    predictions = predict_with_bundle(store, bundle)
-    metrics = summarize_metrics(predictions)
-    return store, bundle, metrics
+    return store, bundle
 
 
 def build_test_store(config: PipelineConfig) -> FeatureStore:
@@ -677,79 +641,3 @@ def build_exif_vector(store: FeatureStore, image_id: str) -> np.ndarray:
         raise ValueError(f"image_id {image_id} not found in store")
     cols = store.feature_groups["exif"]
     return row[cols].values.astype(np.float32)
-
-
-def score_image(
-    image_path: Path | str,
-    bundle: ModelBundle,
-    config: PipelineConfig,
-    *,
-    exif_vector: Optional[np.ndarray] = None,
-) -> Tuple[Dict[str, float], List[MoireTileMetrics], List[SubpixelTileMetrics]]:
-    """
-    evaluate a single image path and return probabilities along with tile diagnostics.
-    """
-    img_path = Path(image_path)
-    gray = load_image(img_path, mode="gray")
-    rgb = load_image(img_path, mode="rgb")
-
-    moire_summary, moire_tiles = extract_moire_features(
-        gray,
-        tile_size=config.tile_size,
-        stride=config.tile_stride,
-        max_tiles=config.max_tiles_per_image,
-    )
-    subpixel_summary, subpixel_tiles = extract_subpixel_features(
-        rgb,
-        tile_size=config.tile_size,
-        stride=config.tile_stride,
-        max_tiles=config.max_tiles_per_image,
-    )
-
-    subpixel_vec = np.array(
-        [subpixel_summary.get(col, 0.0) for col in bundle.feature_groups["subpixel"]],
-        dtype=np.float32,
-    ).reshape(1, -1)
-
-    feature_cols = bundle.feature_groups["exif"]
-    if exif_vector is not None:
-        exif_vec = exif_vector.reshape(1, -1)
-    else:
-        cached = _load_cached_exif(config, img_path, feature_cols)
-        if cached is not None:
-            exif_arr = cached
-        else:
-            try:
-                raw_exif = _extract_raw_exif(img_path)
-                exif_arr = transform_single_exif(raw_exif, feature_cols)
-                _save_cached_exif(config, img_path, raw_exif, exif_arr, feature_cols)
-            except Exception:
-                logger.exception(
-                    "failed to parse exif for %s, falling back to zeros", img_path
-                )
-                exif_arr = np.zeros(len(feature_cols), dtype=np.float32)
-        exif_vec = exif_arr.reshape(1, -1)
-
-    wavelet_tensor, spatial_tensor = compute_wavelet_and_spatial(
-        img_path,
-        wavelet_size=config.tile_size,
-        spatial_size=config.tile_size,
-        wavelet="db2",
-    )
-    moire_prob = float(
-        bundle.moire_model.predict_proba(
-            wavelet_tensor[np.newaxis, ...], spatial_tensor[np.newaxis, ...]
-        )[0]
-    )
-    subpixel_prob = float(bundle.subpixel_model.predict_proba(subpixel_vec)[0])
-    exif_prob = float(bundle.exif_model.predict_proba(exif_vec)[0])
-    fusion_input = np.array([[moire_prob, subpixel_prob, exif_prob]], dtype=np.float32)
-    hybrid_prob = float(bundle.fusion_model.predict_proba(fusion_input)[0])
-
-    scores = {
-        "moire_prob": moire_prob,
-        "subpixel_prob": subpixel_prob,
-        "exif_prob": exif_prob,
-        "hybrid_prob": hybrid_prob,
-    }
-    return scores, moire_tiles, subpixel_tiles

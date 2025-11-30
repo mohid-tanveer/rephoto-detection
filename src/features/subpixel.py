@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 from scipy.signal import convolve2d
 
-from model.features.tiling import (
+from src.features.tiling import (
     Tile,
     center_frequency_grid,
     evenly_sample_tiles,

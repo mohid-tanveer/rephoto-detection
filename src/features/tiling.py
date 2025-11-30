@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Tuple
+from typing import Iterator, List, Tuple
 
 import numpy as np
 
@@ -71,27 +71,6 @@ def evenly_sample_tiles(tiles: List[Tile], max_tiles: int | None) -> List[Tile]:
             if len(sampled) >= max_tiles:
                 break
     return sampled
-
-
-def summarize_tiles(values: Iterable[float]) -> dict[str, float]:
-    """
-    convenience helper to produce summary statistics from a sequence.
-    """
-    arr = np.asarray(list(values), dtype=np.float32)
-    if arr.size == 0:
-        return {
-            "mean": 0.0,
-            "std": 0.0,
-            "max": 0.0,
-            "min": 0.0,
-        }
-
-    return {
-        "mean": float(arr.mean()),
-        "std": float(arr.std()),
-        "max": float(arr.max()),
-        "min": float(arr.min()),
-    }
 
 
 def center_frequency_grid(

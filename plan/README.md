@@ -1,4 +1,4 @@
-# Re-photo Detection Project
+# Re-photo Detection Research Plan
 
 ## Goal + Background
 

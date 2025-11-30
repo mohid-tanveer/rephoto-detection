@@ -7,7 +7,7 @@ import numpy as np
 import pywt
 from PIL import Image
 
-from model.utils.image import load_image
+from src.utils.image import load_image
 
 
 def _resize_image(gray: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
