@@ -46,17 +46,17 @@
 
 ## what the metrics tell us
 
-the notebook reports metrics at three levels: overall train/test, lod (by `screen_type`), and loc (by `camera_body`). across all three views, the behavior of each signal is very different from the initial intuition.
+the notebook reports metrics at three levels: test set performance, lod (by `screen_type`), and loc (by `camera_body`). across all three views, the behavior of each signal is very different from the initial intuition.
 
-- **overall train/test performance**:
+- **overall test set performance**:
   - **moire**:
-    - training and test aucs around **0.98+**, but **fpr@95 tpr** roughly in the **0.07–0.15** range.
+    - test auc around **0.98+**, but **fpr@95 tpr** falls slightly short of good at **0.15**.
     - interpretation: moire is a meaningful signal, but not clean enough to stand alone at low-false-positive operating points.
   - **subpixel**:
-    - aucs roughly **0.84–0.89**, but **fpr@95 tpr** close to **0.5** on both train and test.
+    - auc roughly **0.84**, but **fpr@95 tpr** close to **0.5** on test set.
     - interpretation: the model ranks many positive examples reasonably well, but the score distribution for negatives heavily overlaps with positives; at realistic tpr levels it produces **too many false positives**.
   - **exif**:
-    - auc **1.0** and **fpr@95 tpr = 0.0** on both train and test.
+    - auc **1.0** and **fpr@95 tpr = 0.0** on test set.
     - interpretation: within this dataset, exif alone almost perfectly separates re-photos from authentic images.
   - **hybrid**:
     - mirrors exif with auc **1.0** and **fpr@95 tpr = 0.0**, suggesting:
@@ -67,7 +67,7 @@ the notebook reports metrics at three levels: overall train/test, lod (by `scree
     - **moire**:
       - auc in the **0.82–0.87** range,
       - **fpr@95 tpr** around **0.4–0.67**.
-      - decent ranking but high false positive rates once we push tpr high.
+      - decent separation between classes but high false positive rates once we push tpr high.
     - **subpixel**:
       - auc in the **0.72–0.77** range,
       - **fpr@95 tpr** often approaching **1.0**.
@@ -82,11 +82,11 @@ the notebook reports metrics at three levels: overall train/test, lod (by `scree
 - **leave-one-camera-out (loc)**:
   - across iPhone 12 Pro Max, 14 Pro Max, and 17 Pro:
     - **moire**:
-      - aucs in the **0.75–0.91** range,
-      - **fpr@95 tpr** around **0.3–0.5**.
+      - aucs in the **0.75–0.91** (.75, .91, .86) range,
+      - **fpr@95 tpr** around **0.3–0.5** (.51, .50, .29).
       - similar story: somewhat helpful but not reliable at strict operating points.
     - **subpixel**:
-      - aucs vary widely (**0.65–0.90**), but **fpr@95 tpr** is often **very high (up to ~1.0)**.
+      - aucs vary widely (**0.66–0.90** (.66, .70, .90)), but **fpr@95 tpr** is often **very high (up to ~1.0)** (.99, 1.00, .46).
       - indicates strong **false positive tendencies** when the camera configuration changes.
     - **exif**:
       - auc **1.0**, **fpr@95 tpr = 0.0** across cameras.
@@ -98,37 +98,6 @@ these results clearly show that:
 - the **exif prior is dominating**, providing nearly perfect separation and generalization within this dataset,
 - **moire** is a useful but secondary cue,
 - **subpixel**, at least in this implementation and dataset, is **not a reliable indicator of re-photos**.
-
-## interpreting subpixel’s poor performance
-
-from the metrics and the feature design, several plausible explanations emerge for why subpixel detection underperforms and produces so many false positives:
-
-- **screen and camera pipelines blur subpixel structure**:
-  - modern displays (especially high-density oled and lcd) and modern phone cameras aggressively apply:
-    - subpixel rendering,
-    - temporal dithering,
-    - demosaicing,
-    - denoising, sharpening, and resizing.
-  - by the time an image is saved as a jpeg and possibly rescaled, the crisp subpixel grid we expect conceptually may be **partially smeared into generic high-frequency texture**, which is also present in many authentic scenes (e.g., fabric, foliage, building facades).
-
-- **feature design may be capturing generic high-frequency structure, not screen-specific cues**:
-  - the cross-power peaks and period measures respond strongly to **any** strong regular structure or high-contrast edges.
-  - if re-photos tend to be of relatively flat, synthetic content (ui, illustrations) and authentic images include lots of textured natural scenes, it is easy for the subpixel features to confuse:
-    - fine edges and repeating patterns in real scenes,
-    - with genuine screen subpixel patterns.
-  - this would explain why auc is non-trivial (it sometimes ranks positives higher) but **fpr explodes** at high tpr.
-
-- **limited dataset vs. high-dimensional feature space**:
-  - the subpixel summary includes many different statistics (ratios, periods, percentiles, consistency measures).
-  - with only a few hundred images, logistic regression can easily learn spurious correlations that work on the training set but do not generalize to new cameras or display types.
-  - the lod/loc metrics suggest exactly this: what looked decent in-sample does not transfer.
-
-- **tile scale and alignment may be suboptimal**:
-  - tiles of size 256–512 pixels at the final image resolution may not align nicely with the underlying subpixel grid.
-  - any misalignment, plus the use of relatively large tiles, can average out subpixel-level information and make the cross-spectral cues much noisier.
-  - after testing, however, we found that the auc and fpr@95 tpr values did not change significantly when we changed the tile size or stride.
-
-in short, the subpixel branch currently behaves more like a **generic “high-frequency texture detector”** than a robust screen-specific cue.
 
 ## interpreting exif’s very strong performance
 
@@ -144,10 +113,8 @@ exif’s near-perfect performance is both encouraging and suspicious:
 
 - **why it might be overestimating generalization**:
   - in this project, **we captured the re-photos in a fairly consistent way**:
-    - similar devices (mostly iphones),
-    - similar zoom levels and focal lengths,
-    - similar display types and environments.
-  - that makes it easier for the random forest to latch onto dataset-specific quirks such as:
+    - similar capture styles (capturing close to the screen with slight zoom),.
+  - this could make it easier for the random forest to latch onto dataset-specific quirks such as:
     - exact combinations of focal length, iso, and shutter speed
     - particular exposure and metering modes used for re-photos vs. authentic scenes.
   - because these quirks are consistent across the lod/loc splits, exif appears to generalize, but that is **within the same overall acquisition protocol**.
@@ -178,6 +145,27 @@ moire performs better than subpixel but clearly lags behind exif:
   - when you hold out an entire screen type or camera body, those geometric and optical conditions change enough that the learned moire patterns only partially transfer.
 
 so moire is a **valuable secondary cue**, but on this dataset it cannot match exif’s reliability, and it alone would not support low-false-positive deployment.
+
+## interpreting subpixel’s poor performance
+
+from the metrics and the feature design, several plausible explanations emerge for why subpixel detection underperforms and produces so many false positives:
+
+- **screen and camera pipelines blur subpixel structure**:
+  - modern displays (especially high-density oled and lcd) and modern phone cameras aggressively apply:
+    - subpixel rendering,
+    - temporal dithering,
+    - demosaicing,
+    - denoising, sharpening, and resizing.
+  - by the time an image is saved as a jpeg and possibly rescaled, the crisp subpixel grid we expect conceptually may be **partially smeared into generic high-frequency texture**, which is also present in many authentic scenes (e.g., fabric, foliage, building facades).
+
+- **feature design may be capturing generic high-frequency structure, not screen-specific cues**:
+  - the cross-power peaks and period measures respond strongly to **any** strong regular structure or high-contrast edges.
+  - if re-photos tend to be of relatively flat, synthetic content (ui, illustrations) and authentic images include lots of textured natural scenes, it is easy for the subpixel features to confuse:
+    - fine edges and repeating patterns in real scenes,
+    - with genuine screen subpixel patterns.
+  - this would explain why auc is non-trivial (it sometimes ranks positives higher) but **fpr explodes** at high tpr.
+  
+in short, the subpixel branch currently behaves more like a **generic “high-frequency texture detector”** than a robust screen-specific cue.
 
 ### future directions and open questions
 
