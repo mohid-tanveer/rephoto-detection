@@ -1,0 +1,333 @@
+\documentclass[letterpaper,twocolumn,10pt]{article}
+\usepackage{usenix,epsfig,endnotes,amsmath}
+\begin{document}
+
+% don't want date printed
+\date{}
+
+% make title bold and 14 pt font (latex default is non-bold, 16 pt)
+\title{\Large \bf ScreenSense: Detecting Screen Re-photos at Verification Time}
+
+\author{
+{\rm Mohid Tanveer}\\
+University of California San Diego\\
+mtanveer@ucsd.edu
+\and
+{\rm Hengzhou Li}\\
+University of California San Diego\\
+hel053@ucsd.edu
+\and
+{\rm Aleksa Popovic}\\
+University of California San Diego\\
+alpopovic@ucsd.edu
+}
+
+\maketitle
+
+% use the following at camera-ready time to suppress page numbers.
+% comment it out when you first submit the paper for review.
+\thispagestyle{empty}
+
+\paragraph{\textit{Abstract}---The content provenance standard C2PA proposes that cameras cryptographically sign every capture, and recent work such as VerITAS shows how to preserve this provenance through a constrained set of image edits using zk-SNARKs~\cite{veritas}. However, both the standard and prior systems largely assume that the signed image is a direct physical capture of the underlying scene. An attacker can instead display arbitrary content, for example an AI-generated or out-of-context photo, on a screen and re-photograph that screen with a C2PA-signing camera, producing a cryptographically valid but misleading image. In this project we investigate \emph{ScreenSense}, a hybrid detector that runs at verification time and attempts to distinguish screen re-photos from authentic photos using only the decoded JPEG and its EXIF metadata. Our pipeline combines: (1) a random-forest EXIF prior over camera metadata, (2) a wavelet + CNN branch targeting moir\'e artifacts, and (3) a sub-pixel structure branch that analyzes cross-channel frequency patterns, with a small neural fusion head on top. On our collected dataset, the EXIF prior alone achieves AUC $\approx 1.0$ and $\text{FPR}@95\ \text{TPR} \approx 0$, while the wavelet CNN reaches AUC $0.99$ but with higher false positive rates and the sub-pixel branch under performs. We empirically find that, under our current data collection protocol, capture metadata is the dominant cue for re-photos, and we discuss limitations and directions for making signal-level cues more robust.}
+
+\section{Introduction}
+
+Verifying where and when a digital image was taken has become increasingly important in the face of large-scale misinformation. The C2PA standard~\cite{c2pa} proposes that cameras digitally sign each capture along with selected EXIF metadata and possibly device information, enabling downstream consumers to verify that an image in a news article originated from a trusted device and has not been arbitrarily manipulated. Recent work such as VerITAS~\cite{veritas} shows how to preserve this provenance even after common edits (cropping, resizing, blurring) by replacing the camera's signature with a zk-SNARK that proves the edited image was derived from a properly signed original using only whitelisted transformations.
+
+While these systems significantly strengthen provenance, they intentionally focus on transformations inside the camera-to-editor-to-publisher pipeline. A key open gap is that the camera may itself be pointed at untrustworthy content. An adversary can display an AI-generated or out-of-context image on an LCD/OLED display, photograph the screen with a C2PA-compliant camera, and obtain a capture that verifies as genuine with respect to the camera and the signing key, even though the underlying scene is not what it purports to be. This \emph{screen re-photo} attack threatens ``glass-to-glass'' security, in which the user wants assurance that the signed image corresponds to a live physical scene and not to content replayed from another device.
+
+In this work we explore whether lightweight, verification-time signal analysis can help close this gap. Motivated by forensic work on moir\'e pattern detection in digital photos~\cite{moire}, and by the observation in VerITAS that focal length and other EXIF features can correlate with suspicious captures, we design and implement a hybrid detector that takes as input a JPEG and its EXIF metadata and outputs a probability that the image is a screen re-photo.
+
+Our contributions are:
+\begin{itemize}
+  \item We formalize a threat model in which the verifier only considers C2PA-verified images, so attackers cannot freely tamper with metadata: any modification that breaks the signature will cause the content credentials to appear invalid or untrusted. Within this model, we focus on distinguishing genuine scene captures from re-photos of screens.
+  \item We implement a three-signal hybrid detector: (1) an EXIF prior trained as a random forest over engineered metadata features, (2) a wavelet + CNN branch designed to pick up moir\'e and other high-frequency artifacts, and (3) a sub-pixel analysis branch that looks for color substructure consistent with LCD/OLED stripe layouts, fused via a small Torch-based linear head.
+  \item We evaluate this system on a dataset of photos containing both authentic scenes and re-photos of LCD and OLED displays, reporting overall performance as well as leave-one-display-type-out (LOD) and leave-one-camera-out (LOC) metrics. We find that EXIF metadata alone is extremely strong under our collection protocol, while moir\'e provides a useful but secondary cue and our current sub-pixel design is not yet reliable.
+\end{itemize}
+
+\paragraph{Problem statement.}
+At a high level, we model verification-time re-photo detection as a constrained binary classification problem. The verifier observes an image $x$ (decoded from JPEG) and a metadata vector $m$ (EXIF fields covered by a valid C2PA manifest), and must predict a label $y \in \{0,1\}$ indicating whether $x$ is an authentic scene capture ($y=0$) or a re-photo of a display ($y=1$). The constraint is that $m$ is not an arbitrary attacker-chosen feature vector: under our threat model, any post-hoc modification to $m$ that breaks C2PA verification causes the asset to be rejected or downgraded in trust. ScreenSense therefore aims to learn a decision rule $f(x,m)$ that leverages both pixel-level signals and metadata while respecting this provenance constraint, and to characterize how well such a rule can generalize across displays and camera bodies within our dataset.
+
+
+\section{Background and Related Work}
+
+\subsection{C2PA and Content Provenance}
+
+The Coalition for Content Provenance and Authenticity (C2PA) standardizes how devices and software can attach cryptographic attestations, called ``content credentials'', to media assets~\cite{c2pa}. A C2PA-enabled camera signs a manifest describing the original capture, including selected EXIF metadata and possibly device information, using a device-specific signing key anchored in a public key infrastructure. Subsequent editing applications are expected to record edits and new manifests, preserving a chain of signed transformations from capture to publication.
+
+For a verifier, checking provenance involves validating these signatures and ensuring that the manifest chain is intact. If metadata fields that are covered by the manifest signature are altered in an ad-hoc way (for example, by manually editing EXIF tags in a JPEG), the resulting content credentials will fail to verify or will be flagged as untrusted. Our work deliberately operates in this setting: we assume the verifier only accepts images whose C2PA signatures validate, and therefore treats the presented metadata as authentic outputs of the capture pipeline rather than attacker-controlled inputs.
+
+\subsection{VerITAS: zk-SNARKs for Image Editing}
+
+Datta et al.\ present VerITAS, a system for ``verifying image transformations at scale'' using succinct zero-knowledge arguments (zk-SNARKs)~\cite{veritas}. VerITAS addresses a core limitation of the raw C2PA proposal: in practice, images are almost always edited (cropped, resized, blurred) before publication, and a naive signature on the original capture cannot be verified given only the edited image. VerITAS introduces a zk-SNARK proof system in which the editor proves that the published image results from applying only whitelisted transformations to a signed original whose signature verifies under the C2PA public key.
+
+The key innovation is a proof system that supports large witness data: the prover knows a high-resolution original image and a valid signature, and proves that the edited image is a correct transformation without revealing the original. The resulting proofs are succinct and can be verified quickly by end users. However, VerITAS explicitly assumes that the original capture is a faithful recording of the scene. It does not attempt to detect whether the camera was pointed at a physical scene or at an untrusted display showing arbitrary content. Our project can be seen as an orthogonal ``liveness'' layer that plugs into the verifier side of VerITAS or similar C2PA workflows.
+
+\subsection{Moir\'e Pattern Detection in Digital Photos}
+
+Moir\'e patterns arise when a discrete sampling grid (such as a camera sensor) records another discrete periodic structure (such as an LCD sub-pixel layout). Prior forensic work on moir\'e detection in digital photos, including ``Doing More with Moir\'e Pattern Detection in Digital Photos''~\cite{moire}, studies how to detect these structured aliasing artifacts as a way to infer that an image contains a display. These methods often analyze frequency-domain statistics, looking for peaks and regularities aligned with expected screen pixel pitches and stripe layouts, and sometimes feed these features into classifiers.
+
+Our design borrows this intuition for our moir\'e detection model, in which we build a wavelet + CNN branch that takes as input wavelet-decomposed grayscale tensors and spatial RGB crops, allowing the network to learn non-linear combinations of high-frequency patterns, including moir\'e-like structures. Unlike prior work, we combine these signal-level cues with a strong EXIF-based prior inside a single hybrid pipeline.
+
+\section{Approach and Methodology}
+
+\subsection{Threat Model}
+
+Our goal is to detect re-photos of screens at verification time, assuming that the verifier has access only to the decoded JPEG and its associated content credentials. We explicitly restrict attention to images whose C2PA signatures validate: if the manifest chain is invalid or untrusted, we treat the image as out of scope or already suspicious.
+
+Within this setting, we consider adversaries who:
+\begin{itemize}
+  \item Control the content shown on a display (for example, they can render AI-generated images or replay older photos on an LCD or OLED screen),
+  \item Can position a C2PA-signing camera arbitrarily with respect to that display (choosing angle, distance, and focus),
+  \item And then submit the resulting signed capture as supposed evidence of a real-world scene.
+\end{itemize}
+
+Crucially, in our threat model attackers \emph{cannot} freely alter EXIF metadata or other fields covered by the C2PA manifest signatures without detection. Signing binds the metadata to the image content: if an attacker edits EXIF tags after capture using commodity tools, the C2PA signature over the manifest will no longer verify, and a compliant verifier will either reject the asset or show its content credentials as invalid or untrusted. Similarly, if an attacker attempts to forge a new manifest and signature without access to a trusted signing key, they will fail the usual digital-signature unforgeability guarantees.
+
+This assumption lets us treat EXIF fields such as focal length, aperture, exposure time, ISO, and device model as trustworthy observations of the capture process. The attacker can still indirectly influence these fields by choosing how they take the re-photo (for example, shooting in a dark room at a particular distance from the screen), but they cannot arbitrarily rewrite them post hoc. Our detector is therefore designed to flag patterns \emph{induced} by typical re-photo workflows rather than defending against metadata spoofing.
+
+In addition, we envision this verifier as a complement to human inspection: in many re-photos the moir\'e patterns, sub-pixel cues, and even individual pixels may be highly visible, making automated detection unnecessary. For this reason, we constructed our dataset to emphasize cases in which these cues are subtle and not immediately obvious to a human observer.
+
+\subsection{Data and Indexing Pipeline}
+
+Our dataset consists of physical captures partitioned into authentic photos and re-photos of displays. Re-photos include both AI-generated content shown on screens (AI-LCD, AI-OLED) and authentic images re-displayed for capture, while authentic images are ordinary scenes with no display present. All images are stored under a common project root, with EXIF and label metadata recorded in CSV files (for training, \texttt{data/exif\_metadata.csv}; for testing, \texttt{data/test/test\_exif\_metadata.csv}).
+
+The pipeline starts by building an index over images using a small data module. This index resolves absolute file paths, assigns a stable \texttt{image\_id} per file, and constructs several derived attributes:
+\begin{itemize}
+  \item \textbf{label}: a binary label where 0 indicates an authentic photo and 1 indicates a re-photo of a screen.
+  \item \textbf{screen\_group}: a combined descriptor of screen type and source (for example, LCD-vs-OLED and AI-vs-authentic).
+  \item \textbf{camera\_body}: a concatenation of device make and model (for example, \texttt{Apple\_iPhone 12 Pro Max, Apple\_iPhone 14 Pro Max, Apple\_iPhone 17 Pro)}.
+\end{itemize}
+
+This index is cached as an artifact and serves as the backbone for all downstream feature extraction and evaluation. Using it ensures that all feature tables and tensors remain aligned row-by-row.
+
+\subsection{EXIF Features}
+
+The EXIF prior is built on a dense feature table engineered from camera metadata. We parse EXIF fields into:
+\begin{itemize}
+  \item \textbf{Numeric features}: image width and height, focal length in 35mm-equivalent units, f-number (aperture), exposure time and shutter speed value, and ISO.
+  \item \textbf{Categorical features}: device make and model, screen type and source (for example, AI-LCD vs authentic-OLED), and metering mode.
+\end{itemize}
+
+We further derive engineered features that better capture exposure and geometry:
+\begin{itemize}
+  \item \textbf{Aspect ratio} = width / height.
+  \item \textbf{Log ISO} = $\log(1 + \text{ISO})$, which compresses the dynamic range of ISO values.
+  \item \textbf{Exposure value}, a brightness-related term combining aperture and exposure time.
+  \item \textbf{Focal-per-aperture}, the focal length normalized by the aperture.
+\end{itemize}
+
+Categorical fields are one-hot encoded and concatenated with normalized numeric features to form a fixed-length EXIF vector per image. These vectors feed a random-forest classifier, which serves as a low-cost but empirically very strong prior about how real capture settings differ between authentic scenes and typical re-photo setups.
+
+\subsection{Moir\'e and Sub-pixel Features}
+
+To capture signal-level cues of screens, we extract two families of features from the image pixels.
+
+\paragraph{Wavelet + spatial tensors.}
+For each indexed image we load a grayscale version, resize it to a fixed spatial resolution, and compute a two-level 2D discrete wavelet transform (using the db2 wavelet). We stack approximation and detail coefficients into a multi-channel ``wavelet tensor.'' In parallel, we resize the RGB image to a fixed size and arrange it as a \texttt{(channels, height, width)} tensor. These tensors are stored in a compressed feature artifact and used as inputs to a dual-branch CNN that specializes in moir\'e and other high-frequency artifacts.
+
+\paragraph{Sub-pixel statistics.}
+The sub-pixel branch focuses on cross-channel periodicity consistent with LCD/OLED sub-pixel layouts. For each image we extract overlapping RGB tiles using a sliding window with configured tile size, stride, and maximum tiles per image. For each tile:
+\begin{itemize}
+  \item We apply a 2D Hann window to each color channel and compute 2D FFTs of R, G, and B.
+  \item We compute cross-power spectra between channel pairs (R--G, G--B, R--B) and analyze them along a radial frequency grid.
+  \item We estimate peak ratios (peak cross-power over mean), dominant radial periods, and a period-consistency score across channel pairs, combined with a Sobel-based edge-strength estimate.
+\end{itemize}
+
+These tile-level metrics are summarized into global image features: means, standard deviations, maxima, percentiles, top-k statistics, and fractions of tiles with strong peaks or consistent periods. The resulting feature vector is intended to fire when the image contains regular color stripe patterns characteristic of display sub-pixels.
+
+\subsection{Models and Fusion}
+
+Our hybrid model stack consists of three base learners and a fusion head:
+\begin{itemize}
+  \item \textbf{EXIF Prior.} We train a \texttt{RandomForestClassifier} over the engineered EXIF feature table, with configuration controlling tree count, depth, and regularization. This model outputs a probability that each image is a re-photo based solely on metadata.
+  \item \textbf{Sub-pixel head.} We feed sub-pixel features into a scikit-learn pipeline combining \texttt{StandardScaler} and \texttt{LogisticRegression}. The logistic head learns a linear decision boundary over the high-dimensional sub-pixel statistics, producing a re-photo probability.
+  \item \textbf{Moir\'e wavelet CNN.} The CNN comprises two convolutional branches: one over the wavelet tensor and one over RGB spatial content. Each branch consists of stacked conv--batchnorm--ReLU--max-pooling blocks, followed by global average pooling. The branch outputs are concatenated and passed to a small MLP classifier. We train this network with \texttt{BCEWithLogitsLoss} and Adam, using early stopping based on validation loss and automatically selecting CPU, CUDA, or MPS depending on availability.
+  \item \textbf{Hybrid fusion head.} Finally, we train a single-layer linear head over the three base probabilities \((p_{\text{moire}}, p_{\text{sub-pixel}}, p_{\text{exif}})\). Implemented in Torch, this head is equivalent to logistic regression but integrates cleanly with our existing training infrastructure. It outputs a fused logit that we pass through a sigmoid to obtain the final hybrid probability.
+\end{itemize}
+
+\subsection{Training and Evaluation Protocol}
+
+We implement the end-to-end pipeline as a reusable module. Training proceeds as follows:
+\begin{enumerate}
+  \item We materialize a \emph{feature store} that contains the index table, EXIF feature table, sub-pixel feature table, and wavelet/spatial tensors, with explicit lists of feature columns per signal.
+  \item For each base learner we perform stratified k-fold cross validation on the training data, fitting the model and recording out-of-fold (OOF) probabilities for every image. For the wavelet CNN we train a full model per fold; for the EXIF and sub-pixel models we reuse standard scikit-learn cross-validation.
+  \item We stack the three OOF probability columns into a 3-dimensional representation and train the hybrid fusion head on this stacked matrix, reserving a held-out validation split for early stopping.
+  \item We then refit final versions of each base model on the full training data and store them, along with the fusion head and metadata about feature groups and tiling parameters, in an artifact bundle.
+\end{enumerate}
+
+We evaluate the system along three axes:
+\begin{itemize}
+  \item \textbf{Overall test-set performance}, using a held-out test CSV and corresponding image folders.
+  \item \textbf{Leave-one-display-type-out (LOD)}, where we hold out all re-photos from a given screen type (LCD or OLED) and a balanced subset of authentic images, retrain on the remaining data, and evaluate on the held-out group.
+  \item \textbf{Leave-one-camera-out (LOC)}, where we similarly hold out all images from a given camera body (for example, iPhone 12 Pro Max) and evaluate transfer to that device.
+\end{itemize}
+
+For each setting we report area under the ROC curve (AUC) and the false positive rate at 95\% true positive rate (\(\text{FPR}@95\ \text{TPR}\)) for each signal and for the hybrid fusion. AUC summarizes how well a model ranks re-photos above authentic images across all possible thresholds, which is helpful for comparing signals with different score scales. In contrast, \(\text{FPR}@95\ \text{TPR}\) focuses on the high-sensitivity operating regime that matters for security: we would like to catch almost all re-photos (high TPR) while keeping the fraction of authentic images that are incorrectly flagged (FPR) as low as possible.
+
+\section{Results}
+
+\subsection{Overall Test-set Metrics}
+
+Table~\ref{tab:test} summarizes performance on the held-out test set. The EXIF prior and hybrid fusion achieve perfect AUC and zero false positives at 95\% TPR, while the moir\'e CNN is strong but imperfect and the sub-pixel branch lags.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\hline
+Signal & AUC & FPR@95 TPR \\
+\hline
+Moir\'e & 0.9855 & 0.15 \\
+Sub-pixel & 0.8421 & 0.50 \\
+EXIF & 1.0000 & 0.00 \\
+Hybrid & 1.0000 & 0.00 \\
+\hline
+\end{tabular}
+\caption{Test-set performance for each signal and the hybrid fusion.}
+\label{tab:test}
+\end{table}
+
+The wavelet CNN's AUC of about 0.99 indicates that moir\'e-related cues allow reasonably good ranking of re-photos above authentic images, but the non-zero \(\text{FPR}@95\ \text{TPR}\) shows that at strict operating points the model still misclassifies a non-trivial fraction of authentic scenes as re-photos. The sub-pixel head exhibits both lower AUC and very high false positive rates, suggesting that its features respond to generic high-frequency texture rather than screen-specific structure. In contrast, the EXIF prior nearly perfectly separates the two classes, and the hybrid fusion essentially learns to trust EXIF almost exclusively.
+
+\subsection{Leave-one-display-type-out}
+
+Table~\ref{tab:lod} shows LOD performance when holding out LCD and OLED screen types in turn. Again, EXIF and the hybrid remain near-perfect, while moir\'e and sub-pixel generalize only partially.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\hline
+Held-out & Signal & AUC & FPR@95 TPR \\
+\hline
+LCD & Moir\'e & 0.8249 & 0.67 \\
+LCD & Sub-pixel & 0.7191 & 1.00 \\
+LCD & EXIF & 1.0000 & 0.00 \\
+LCD & Hybrid & 0.9988 & 0.02 \\
+OLED & Moir\'e & 0.8726 & 0.42 \\
+OLED & Sub-pixel & 0.7684 & 0.75 \\
+OLED & EXIF & 1.0000 & 0.00 \\
+OLED & Hybrid & 1.0000 & 0.00 \\
+\hline
+\end{tabular}
+\caption{Leave-one-display-type-out results by signal.}
+\label{tab:lod}
+\end{table}
+
+The moir\'e CNN maintains AUC in the 0.82--0.87 range but suffers high false positive rates, especially when holding out LCD displays. The sub-pixel head performs worse, with AUC values in the low 0.7s and \(\text{FPR}@95\ \text{TPR}\) often at or near 1.0. EXIF generalizes almost perfectly across display types within this dataset, and the hybrid fusion closely tracks EXIF.
+
+\subsection{Leave-one-camera-out}
+
+Table~\ref{tab:loc} reports LOC results when holding out each iPhone model in turn.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\hline
+Held-out camera & Signal & AUC & FPR@95 TPR \\
+\hline
+iPhone 12 Pro Max & Moir\'e & 0.7541 & 0.51 \\
+iPhone 12 Pro Max & Sub-pixel & 0.6575 & 0.99 \\
+iPhone 12 Pro Max & EXIF & 1.0000 & 0.00 \\
+iPhone 12 Pro Max & Hybrid & 1.0000 & 0.00 \\
+iPhone 14 Pro Max & Moir\'e & 0.9078 & 0.50 \\
+iPhone 14 Pro Max & Sub-pixel & 0.7022 & 1.00 \\
+iPhone 14 Pro Max & EXIF & 1.0000 & 0.00 \\
+iPhone 14 Pro Max & Hybrid & 1.0000 & 0.00 \\
+iPhone 17 Pro & Moir\'e & 0.8560 & 0.29 \\
+iPhone 17 Pro & Sub-pixel & 0.8966 & 0.46 \\
+iPhone 17 Pro & EXIF & 1.0000 & 0.00 \\
+iPhone 17 Pro & Hybrid & 1.0000 & 0.00 \\
+\hline
+\end{tabular}
+\caption{Leave-one-camera-out results by signal.}
+\label{tab:loc}
+\end{table}
+
+Here the moir\'e CNN's AUC varies from about 0.75 to 0.91 with moderately high false positive rates, while sub-pixel AUCs span 0.66--0.90 but often with \(\text{FPR}@95\ \text{TPR}\) near 1.0. The iPhone 17 Pro split is a mild exception, where both moir\'e and sub-pixel FPRs are noticeably lower than for the other two cameras; this could reflect that, for this newer sensor and optics, our capture protocol happened to produce clearer screen artifacts and less confusing texture in authentic scenes. EXIF remains effectively perfect across camera bodies, and the hybrid again mirrors EXIF performance.
+
+\section{Analysis and Discussion}
+
+\subsection{Interpreting EXIF's Dominance}
+
+The most striking outcome is the strength of the EXIF prior. Across the test set, LOD, and LOC evaluations, EXIF alone achieves AUC essentially equal to 1.0 with zero false positives at 95\% TPR. This suggests that, within our dataset, camera metadata strongly encodes whether a photo is a re-photo.
+
+There are at least two plausible readings. On the positive side, in realistic workflows re-photos may indeed exhibit distinctive EXIF profiles: they are often taken at closer focus distances, with particular aperture and shutter combinations (especially indoors), and with characteristic ISO and metering choices that differ from varied authentic scenes. If these patterns hold broadly, EXIF-based priors could be a powerful and inexpensive tool for re-photo detection.
+
+On the other hand, our data collection followed a relatively consistent re-photo protocol: we used a small set of devices and capture styles when photographing screens. This consistency makes it easy for a random forest to latch onto dataset-specific quirks such as particular focal-length and ISO combinations that happen to correlate with re-photos in this environment. Because the LOD and LOC splits still share the same overall acquisition protocol, EXIF appears to generalize, but this may overestimate robustness in the wild.
+
+\subsection{Limitations and Attacker Adaptation}
+
+Our current results should be interpreted with care. We explicitly do not consider attackers who can compromise a trusted signing key or fully control the C2PA capture pipeline; such adversaries could produce arbitrarily forged provenance and fall outside our threat model. Even within our model, a motivated attacker could attempt to mimic EXIF statistics of benign photos by carefully tuning capture distance, exposure, and lighting. Whether such mimicry can be made both effective against ScreenSense and visually convincing to human viewers remains an open empirical question, and our current dataset is not rich enough to answer it.
+
+
+\subsection{Moir\'e and Sub-pixel Cues}
+
+The moir\'e wavelet CNN achieves reasonably high AUC values but less impressive false positive rates, especially under cross-domain splits. This aligns with the intuition that moir\'e is a useful but fragile cue: it depends sensitively on display pixel pitch, sub-pixel layout, camera distance and angle, focus, motion, and the underlying image content. For many re-photos, especially those taken with care to avoid obvious artifacts, visible moir\'e is weak or absent, limiting this signal's standalone reliability.
+
+The sub-pixel branch performs worst, with moderate AUC but very high false positive rates. From the feature design, a likely explanation is that our sub-pixel statistics respond strongly to generic high-frequency structure (for example, fabric textures, foliage, building facades) that also appear in authentic scenes. Modern camera pipelines, including demosaicing, denoising, sharpening, and downscaling, can smear crisp display sub-pixel grids into more generic texture that is hard to distinguish from natural patterns. As a result, the current sub-pixel model behaves more like a generic ``high-frequency texture detector'' than a screen-specific indicator.
+
+\subsection{Differences from Prior Work}
+
+Our system sits alongside, rather than replacing, C2PA and VerITAS. Unlike VerITAS, we do not attempt to prove anything about the relationship between a published edited image and a signed original; we assume that this provenance pipeline is already in place and that the verifier only accepts C2PA-validated assets. Instead, we add a liveness-like check on top: given a C2PA-verified image, is it likely to be a re-photo of a display rather than a direct capture of the scene?
+
+Compared to prior moir\'e-detection work~\cite{moire}, we adopt a more hybrid approach. We still exploit moir\'e cues, but we fuse them with an EXIF prior and evaluate generalization across displays and cameras. Our results indicate that, under our current conditions, metadata is actually the dominant signal, with moir\'e providing secondary help and sub-pixel features underperforming. This stands in mild contrast to some earlier forensic work that emphasized pixel-level cues as primary; it suggests that in modern camera/display ecosystems and under adversarial capture strategies, metadata-based reasoning may play a larger role than previously appreciated.
+
+\subsection{Future Steps}
+
+The current prototype leaves several open questions and opportunities:
+\begin{itemize}
+  \item \textbf{Stress-testing EXIF generalization.} The most urgent next step is to collect additional data in which re-photos are taken with more diverse operators, devices, focal lengths, and exposure settings, and where authentic images share similar EXIF profiles. Rerunning our pipeline on such data would clarify whether EXIF remains as strong as observed here or whether its performance collapses once protocol-specific shortcuts are removed.
+  \item \textbf{Revisiting sub-pixel modeling.} Instead of relying solely on handcrafted cross-power summaries, we could train a small CNN directly on high-resolution crops around edges or suspected screen regions, allowing the model to learn more discriminative representations of sub-pixel structure (if present).
+\end{itemize}
+
+Overall, our results suggest that hybrid re-photo detection at verification time is feasible and that metadata can be extremely informative in controlled settings. At the same time, they highlight the need for more diverse data and improved signal-level modeling if we want detectors that remain reliable across capture styles and adversaries.
+
+\newpage
+
+\section*{Appendix: Individual Contributions}
+
+All authors contributed to the dataset collection and re-photo acquisition (planning scenes, operating cameras, and labeling images).
+
+\paragraph{Mohid Tanveer.}
+\begin{itemize}
+  \item Engineered the EXIF feature stack, including numeric and categorical fields and derived features (aspect ratio, log-ISO, exposure value, focal-per-aperture), and produced the dense EXIF table used by the random-forest prior.
+  \item Designed and implemented the wavelet + spatial tensor pipeline for moir\'e analysis, adapting ideas from ``Doing more with moir\'e pattern detection in digital photos'' to create a multi-scale frequency representation suitable for learning.
+  \item Implemented the dual-branch moir\'e wavelet CNN that takes in the wavelet and spatial tensors (wavelet and RGB branches, pooling, MLP head).
+  \item Implemented the main pipeline orchestration, including the feature store, model training routines (per-signal and hybrid fusion), test-set evaluation, and leave-one-group-out experiments.
+\end{itemize}
+
+\paragraph{Aleksa Popovic.}
+\begin{itemize}
+  \item Built the data and indexing layer that ingests CSV metadata, resolves image paths, assigns stable \texttt{image\_id}s, and derives fields such as \texttt{label\_binary}, \texttt{screen\_group}, and \texttt{camera\_body}.
+  \item Developed the sub-pixel (color structure) feature extractor based on cross-channel FFT analysis over RGB tiles, including tile-level metrics (peak ratios, dominant periods, period consistency, edge strength) and their aggregated distribution summaries.
+  \item Integrated sub-pixel features into the feature store and supported their use in both overall test-set evaluation and leave-one-group-out analyses.
+\end{itemize}
+
+\paragraph{Hengzhou Li.}
+\begin{itemize}
+  \item Implemented the EXIF prior model as a random forest over the engineered EXIF feature vectors, including configuration, training, and serialization, and validated its behavior as a strong metadata-only baseline.
+  \item Implemented the sub-pixel logistic head (standardization + logistic regression) that learns a linear decision boundary over the high-dimensional sub-pixel statistics.
+  \item Designed and implemented the hybrid fusion head that combines moir\'e, sub-pixel, and EXIF probabilities, along with its training loop (loss, early stopping, and configuration), and helped analyze hybrid vs. per-signal performance across test, LOD, and LOC splits.
+\end{itemize}
+
+
+\begin{thebibliography}{9}
+
+\bibitem{veritas}
+T.~Datta, B.~Chen, and D.~Boneh.
+\newblock VerITAS: Verifying Image Transformations at Scale.
+\newblock In \emph{IEEE Symposium on Security and Privacy}, pp. 4606-4623, 2025.
+
+\bibitem{c2pa}
+Coalition for Content Provenance and Authenticity (C2PA).
+\newblock C2PA technical specification.
+\newblock Online specification, 2024.
+
+\bibitem{moire}
+C. Yang, Z. Yang, Y. Ke, T. Chen, M. Grzegorzek and J. See.
+\newblock Doing More With Moir\'e Pattern Detection in Digital Photos.
+\newblock In \emph{IEEE Transactions on Image Processing}, vol. 32, pp. 694-708, 2023.
+
+\end{thebibliography}
+
+\end{document}
