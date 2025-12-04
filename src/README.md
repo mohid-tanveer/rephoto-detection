@@ -1,4 +1,4 @@
-# Re-photo detection model
+# Re-photo Detection Model
 
 ## Overview
 

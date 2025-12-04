@@ -1,6 +1,6 @@
-# reflection on implementation vs original plan
+# Reflection on implementation vs original plan
 
-## high-level alignment
+## High-level alignment
 
 - **core idea preserved**: both the original plan and the final implementation center on a **hybrid detector** that fuses three decision signals:
   - moire cues,
@@ -10,7 +10,7 @@
   - base train/test metrics on a held-out test set,
   - **leave-one-display-type-out (lod)** and **leave-one-camera-out (loc)** splits to probe generalization.
 
-## what changed in the implementation
+## What changed in the implementation
 
 - **moire modeling upgraded to a wavelet + cnn branch**:
   - the original plan envisioned moire as a **handcrafted feature + classical classifier** (e.g., spectral net on top of moire/subpixel features).
@@ -25,7 +25,7 @@
 
 - **subpixel model simplified to a logistic head on richer features**:
   - the plan called for a **spectral net** or small mlp on concatenated moire + subpixel features.
-  - we initially prototyped a neural classifier, but opted for a simpler, more stable logistic regression when the dataset size and feature dimensionality made heavier models hard to justify
+  - initially prototyped a neural classifier, but opted for a simpler, more stable logistic regression when the dataset size and feature dimensionality made heavier models hard to justify
   - in the final code:  
     - subpixel cues are extracted via an extended version of the planned algorithm (cross power between channels, period consistency, edge strength, and summary stats) in `src/features/subpixel.py`,
     - they feed a **`LogisticHead`** (`src/models/logistic_head.py`) rather than the heavier spectral network.
@@ -44,7 +44,7 @@
     - early stopping monitored on a validation split.
   - functionally this is very close to logistic regression, but the torch implementation made it easier to share training infrastructure with the wavelet cnn and to extend the fusion head if needed.
 
-## what the metrics tell us
+## What the metrics tell us
 
 the notebook reports metrics at three levels: test set performance, lod (by `screen_type`), and loc (by `camera_body`). across all three views, the behavior of each signal is very different from the initial intuition.
 
@@ -99,7 +99,7 @@ these results clearly show that:
 - **moire** is a useful but secondary cue,
 - **subpixel**, at least in this implementation and dataset, is **not a reliable indicator of re-photos**.
 
-## interpreting exif’s very strong performance
+## Interpreting exif’s very strong performance
 
 exif’s near-perfect performance is both encouraging and suspicious:
 
@@ -112,7 +112,7 @@ exif’s near-perfect performance is both encouraging and suspicious:
   - if those patterns hold broadly, an exif prior could indeed be a very strong signal.
 
 - **why it might be overestimating generalization**:
-  - in this project, **we captured the re-photos in a fairly consistent way**:
+  - in this project, **the re-photos were captured in a fairly consistent way**:
     - similar capture styles (capturing close to the screen with slight zoom),.
   - this could make it easier for the random forest to latch onto dataset-specific quirks such as:
     - exact combinations of focal length, iso, and shutter speed
@@ -127,7 +127,7 @@ the correct reading is probably:
 
 that uncertainty is important to call out as a limitation and as a clear target for future work.
 
-## interpreting moire’s moderate performance
+## Interpreting moire’s moderate performance
 
 moire performs better than subpixel but clearly lags behind exif:
 
@@ -146,7 +146,7 @@ moire performs better than subpixel but clearly lags behind exif:
 
 so moire is a **valuable secondary cue**, but on this dataset it cannot match exif’s reliability, and it alone would not support low-false-positive deployment.
 
-## interpreting subpixel’s poor performance
+## Interpreting subpixel’s poor performance
 
 from the metrics and the feature design, several plausible explanations emerge for why subpixel detection underperforms and produces so many false positives:
 
@@ -167,7 +167,7 @@ from the metrics and the feature design, several plausible explanations emerge f
   
 in short, the subpixel branch currently behaves more like a **generic “high-frequency texture detector”** than a robust screen-specific cue.
 
-### future directions and open questions
+### Future directions and open questions
 
 based on the plan vs. implementation and the observed metrics, several follow-up steps seem especially important.
 
@@ -185,6 +185,6 @@ based on the plan vs. implementation and the observed metrics, several follow-up
   - in parallel, perform targeted qualitative analysis:
     - visualize cross-power spectra and tile-level scores on a few representative re-photos and authentic images to see what the current features are actually picking up.
 
-## concluding reflection
+## Concluding reflection
 
-the final implementation faithfully realizes the original concept of a hybrid re-photo detector, but the **relative importance of the three signals** is quite different from what we initially expected: exif dominates, moire helps but is secondary, and the current subpixel branch is not yet reliable. this is a useful outcome in itself: it highlights that **capture metadata can be extremely informative in controlled settings**, but also that we need more diverse data and more careful modeling if we want robust, image-based cues that generalize beyond a single capture protocol. for future iterations, the most impactful work is likely to be **testing exif’s limits** on new datasets and **substantially rethinking subpixel modeling**, treating the current implementation as a first, informative prototype rather than a final answer.
+the final implementation faithfully realizes the original concept of a hybrid re-photo detector, but the **relative importance of the three signals** is quite different from what was initially expected: exif dominates, moire helps but is secondary, and the current subpixel branch is not yet reliable. this is a useful outcome in itself: it highlights that **capture metadata can be extremely informative in controlled settings**, but also that we need more diverse data and more careful modeling if we want robust, image-based cues that generalize beyond a single capture protocol. for future iterations, the most impactful work is likely to be **testing exif’s limits** on new datasets and **substantially rethinking subpixel modeling**, treating the current implementation as a first, informative prototype rather than a final answer.

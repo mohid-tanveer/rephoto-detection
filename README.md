@@ -1,15 +1,15 @@
 # Re-photo Detection Research Project
 
-this project attempts to implement a hybrid detector for identifying re-photos (images of screens) versus authentic photos. it combines:
+This project attempts to implement a hybrid detector for identifying re-photos (images of screens) versus authentic photos. it combines:
 
 - **wavelet + cnn modeling**: a dual-branch cnn over wavelet coefficients and spatial rgb content.
 - **subpixel analysis**: color substructure patterns consistent with lcd/oled subpixels.
 - **exif priors**: camera metadata and engineered exif features.
 - **fusion head**: a small neural net that combines per-signal probabilities into a final score.
 
-the main entrypoint for experimentation is the notebook `notebooks/rephoto.ipynb`, which orchestrates the end-to-end pipeline implemented in `src/`.
+The main entrypoint for experimentation is the notebook `notebooks/rephoto.ipynb`, which orchestrates the end-to-end pipeline implemented in `src/`.
 
-## directory layout
+## Directory layout
 
 - **data/**: training and test images plus csv metadata.
   - **exif_metadata.csv**: exif + label metadata for training/validation.
@@ -27,9 +27,9 @@ the main entrypoint for experimentation is the notebook `notebooks/rephoto.ipynb
   - **utils/image.py**: basic image loading and resizing helpers.
 - **notebooks/rephoto.ipynb**: interactive notebook that configures and runs the hybrid stack and visualizes metrics.
 
-## data and indexing
+## Data and indexing
 
-the pipeline starts from csv metadata, primarily `data/exif_metadata.csv`, which includes:
+The pipeline starts from csv metadata, primarily `data/exif_metadata.csv`, which includes:
 
 - **filepath / filename**: location and id for each image.
 - **label**: label string (e.g., `authentic` vs. re-photo variants).
@@ -44,13 +44,13 @@ the pipeline starts from csv metadata, primarily `data/exif_metadata.csv`, which
   - **`image_id`**: a stable id derived from `filename`.
   - **`label_binary`**: numeric label where 0 = authentic, 1 = re-photo.
   - **`screen_group`**: combined `screen_type` + `screen_source`.
-  - **`camera_body`**: combined `device_make` + `device_model`.
+- **`camera_body`**: combined `device_make` + `device_model`.
 
-this index is the backbone for all downstream feature extraction and model training.
+This index is the backbone for all downstream feature extraction and model training.
 
-## feature extraction
+## Feature extraction
 
-### exif features
+### Exif features
 
 `src/features/exif.py` builds a dense exif-based feature table.
 
@@ -66,7 +66,7 @@ this index is the backbone for all downstream feature extraction and model train
 
 `src/pipeline.py` also defines `_extract_raw_exif` and helpers to build exif vectors for arbitrary jpegs and cache them, enabling on-the-fly metadata-based inference outside the training set.
 
-### subpixel (color structure) features
+### Subpixel (color structure) features
 
 `src/features/subpixel.py` looks at cross-channel periodicity consistent with subpixel layouts.
 
@@ -85,9 +85,9 @@ this index is the backbone for all downstream feature extraction and model train
   - distribution summaries (`mean`, `std`, `max`, percentiles) for scores, edges, consistency, ratios, and periods.
   - additional top-k and global statistics (e.g., fraction of tiles with high peak ratios).
 
-these features are designed to pick up on repeating color subpixel grids typical of photographed screens.
+These features are designed to pick up on repeating color subpixel grids typical of photographed screens.
 
-### wavelet + spatial tensors
+### Wavelet + spatial tensors
 
 `src/features/moire_wavelet.py` builds tensors consumed by the cnn:
 
@@ -102,11 +102,11 @@ these features are designed to pick up on repeating color subpixel grids typical
   - persists them to a compressed `.npz` file in `artifacts/features`.
   - reloads them from cache when possible to avoid recomputation.
 
-these tensors serve as the high-capacity input to the moire wavelet cnn.
+These tensors serve as the high-capacity input to the moire wavelet cnn.
 
-## models
+## Models
 
-### exif prior (random forest)
+### Exif prior (random forest)
 
 `src/models/exif_prior.py` implements `ExifPriorModel`:
 
@@ -114,9 +114,9 @@ these tensors serve as the high-capacity input to the moire wavelet cnn.
 - configuration (`ExifPriorConfig`) controls tree count, depth, and regularization.
 - supports `fit`, `predict_proba`, and `save`/`load` via joblib, packaging both the model and the feature name ordering.
 
-this model captures metadata-only priors about which camera and capture settings are more likely to correspond to re-photos.
+This model captures metadata-only priors about which camera and capture settings are more likely to correspond to re-photos.
 
-### subpixel head (logistic regression)
+### Subpixel head (logistic regression)
 
 `src/models/logistic_head.py` implements `LogisticHead`:
 
@@ -124,9 +124,9 @@ this model captures metadata-only priors about which camera and capture settings
 - `LogisticConfig` exposes regularization strength, max iterations, and class weights.
 - provides `fit`, `predict_proba`, and `save`/`load` while retaining the feature name order.
 
-this head learns a linear decision boundary over the rich subpixel statistics.
+This head learns a linear decision boundary over the rich subpixel statistics.
 
-### moire wavelet cnn
+### Moire wavelet cnn
 
 `src/models/moire_wavelet_cnn.py` defines a dual-branch cnn:
 
@@ -137,14 +137,15 @@ this head learns a linear decision boundary over the rich subpixel statistics.
   - similar conv blocks over rgb spatial content, with an additional higher-capacity block.
   - global average pooling to summarize spatial features.
 - the two branches are concatenated and fed to a small mlp classifier.
+-
 - `MoireWaveletModel`:
   - manages device placement (cpu / cuda / mps).
   - trains with `BCEWithLogitsLoss` and adam, using early stopping based on validation loss.
   - exposes `predict_proba` and `save`/`load` methods.
 
-this cnn specializes in high-frequency artifacts and structured moire patterns that may not be linearly separable.
+This cnn specializes in high-frequency artifacts and structured moire patterns that may not be linearly separable.
 
-### hybrid fusion head
+### Hybrid fusion head
 
 `src/models/hybrid_classifier.py` implements the fusion model:
 
@@ -155,13 +156,13 @@ this cnn specializes in high-frequency artifacts and structured moire patterns t
 - trained with `BCEWithLogitsLoss` and early stopping on validation loss (`HybridConfig` controls lr, weight decay, epochs, patience, batch size).
 - returns a final **hybrid probability** via a sigmoid over the fused logits.
 
-this model learns how to weight each signal depending on its reliability for a given image population.
+This model learns how to weight each signal depending on its reliability for a given image population.
 
-## pipeline orchestration
+## Pipeline orchestration
 
 `src/pipeline.py` connects indexing, feature extraction, and modeling into a single workflow.
 
-### configuration and feature store
+### Configuration and feature store
 
 - **`PipelineConfig`** defines:
   - paths: `data_dir`, `exif_csv`, `artifacts_dir`, optional `test_data_dir` and `test_exif_csv`.
@@ -174,7 +175,7 @@ this model learns how to weight each signal depending on its reliability for a g
   - `moire_wavelet` and `moire_spatial` tensors.
   - a `subset` method to keep all views/tensors aligned when filtering rows.
 
-### building features
+### Building features
 
 `build_feature_store(config)` performs:
 
@@ -193,9 +194,9 @@ this model learns how to weight each signal depending on its reliability for a g
    - merges moire, subpixel, and exif features with the index on `image_id`.
    - fills missing values with zeros and records feature column groups.
 
-the result is a fully materialized `FeatureStore` ready for training and evaluation.
+The result is a fully materialized `FeatureStore` ready for training and evaluation.
 
-### training individual models and fusion
+### Training individual models and fusion
 
 `train_models(store, config)`:
 
@@ -216,9 +217,9 @@ the result is a fully materialized `FeatureStore` ready for training and evaluat
    - all models to `artifacts/models`,
    - metadata (feature groups and tiling parameters) to `metadata.json`.
 
-the function returns a `ModelBundle` containing all trained components and feature group metadata.
+The function returns a `ModelBundle` containing all trained components and feature group metadata.
 
-### prediction and metrics
+### Prediction and metrics
 
 - **`predict_with_bundle(store, bundle)`**:
   - computes `moire_prob`, `subpixel_prob`, `exif_prob`, and `hybrid_prob` for all rows in `store.table`.
@@ -229,7 +230,7 @@ the function returns a `ModelBundle` containing all trained components and featu
     - computes `fpr_at_95_tpr` via `roc_curve`, i.e., the false positive rate when the true positive rate is near 0.95.
   - returns a compact metrics table used in the notebook.
 
-### leave-one-group-out evaluation
+### Leave-one-group-out evaluation
 
 `evaluate_leave_one(store, config, split_column)` analyzes generalization across domains:
 
@@ -241,9 +242,9 @@ the function returns a `ModelBundle` containing all trained components and featu
 - retrains the full hybrid pipeline on the training subset and evaluates on the held-out subset.
 - aggregates per-signal metrics along with the held-out group identifier.
 
-this provides a robust measure of how well the detector transfers to unseen screens or camera bodies.
+This provides a robust measure of how well the detector transfers to unseen screens or camera bodies.
 
-### test-set evaluation
+### Test-set evaluation
 
 `evaluate_on_test_set(config, bundle)`:
 
@@ -251,9 +252,9 @@ this provides a robust measure of how well the detector transfers to unseen scre
 - reuses the already-trained `ModelBundle` (including the fusion head).
 - computes metrics via `summarize_metrics` and returns both the test feature store and its metrics table.
 
-this is what the notebook uses for the final held-out evaluation.
+This is what the notebook uses for the final held-out evaluation.
 
-### high-level helpers
+### High-level helpers
 
 - **`run_full_pipeline(config)`**:
   - builds the training feature store,
@@ -264,7 +265,7 @@ this is what the notebook uses for the final held-out evaluation.
 - **`build_exif_vector`**:
   - extracts an exif feature vector for a specific `image_id` from a populated `FeatureStore`, which is helpful for targeted analysis or debugging.
 
-## notebook workflow
+## Notebook workflow
 
 `notebooks/rephoto.ipynb` wires the pipeline together in an interactive environment:
 
@@ -286,11 +287,11 @@ this is what the notebook uses for the final held-out evaluation.
   - filtering by filename,
   - inspecting `label_binary`, `moire_prob`, `subpixel_prob`, `exif_prob`, and `hybrid_prob` for a specific image.
 
-this notebook is the main artifact for exploring model behavior and validating the detector qualitatively and quantitatively.
+This notebook is the main artifact for exploring model behavior and validating the detector qualitatively and quantitatively.
 
-## running the project
+## Running the project
 
-### environment setup
+### Environment setup
 
 - **create a virtual environment** (example with python 3.11+):
 
