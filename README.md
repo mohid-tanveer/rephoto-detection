@@ -7,6 +7,8 @@ This project attempts to implement a hybrid detector for identifying re-photos (
 - **exif priors**: camera metadata and engineered exif features.
 - **fusion head**: a small neural net that combines per-signal probabilities into a final score.
 
+You can read the full paper here: [ScreenSense: Detecting Screen Re-photos at Verification Time](./ScreenSense_Detecting_Screen_Re-photos_at_Verification_Time.pdf)
+
 The main entrypoint for experimentation is the notebook `notebooks/rephoto.ipynb`, which orchestrates the end-to-end pipeline implemented in `src/`.
 
 ## Directory layout
